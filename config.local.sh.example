@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Local configuration — copy to config.local.sh and fill in.
+# This file is gitignored. Never commit the real config.local.sh.
+
+# ── Project discovery ─────────────────────────────────────────────
+# The runner scans this directory for subdirectories containing .me.sh
+PROJECTS_ROOT="$HOME/play"
+
+# ── Remote servers ────────────────────────────────────────────────
+STAGING_HOST=""
+UAT_HOST=""
+PROD_HOST=""
+REMOTE_USER="ubuntu"

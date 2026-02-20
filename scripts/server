@@ -1,0 +1,428 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ╔════════════════════════════════════════════════════════════════════╗
+# ║  Generic Project Runner                                            ║
+# ║                                                                    ║
+# ║  Usage: ./scripts/server [env] <command> [project] [args...]       ║
+# ║  Envs:  local (default), docker, staging, uat, prod                ║
+# ║                                                                    ║
+# ║  This script has zero project-specific knowledge.                  ║
+# ║  Context comes from:                                               ║
+# ║    .me.sh    — adapter file in each project root                   ║
+# ║    config.local.sh — project discovery + server IPs (gitignored)   ║
+# ╚════════════════════════════════════════════════════════════════════╝
+
+# ── Colors (exported so adapters can use them) ────────────────────────
+export RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m'
+export BLUE='\033[0;34m' PURPLE='\033[0;35m' CYAN='\033[0;36m'
+export BOLD='\033[1m' DIM='\033[2m' NC='\033[0m'
+
+print_header()  { echo -e "${BLUE}=== $1 ===${NC}"; }
+print_status()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERR]${NC}  $1"; }
+print_success() { echo -e "${GREEN}[OK]${NC}   $1"; }
+
+# ── Shared Utilities (available to adapters) ──────────────────────────
+port_alive() { lsof -ti:"$1" &>/dev/null; }
+
+port_status() {
+    local port="$1" label="$2"
+    if port_alive "$port"; then
+        echo -e "  ${GREEN}[up]${NC}   $label  :${port}"
+    else
+        echo -e "  ${RED}[down]${NC} $label  :${port}"
+    fi
+}
+
+kill_port() {
+    local port="$1" pid
+    pid=$(lsof -ti:"$port" 2>/dev/null || true)
+    if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true; sleep 1
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+require_cmd() {
+    command -v "$1" &>/dev/null || { print_error "$1 not installed${2:+ — $2}"; return 1; }
+}
+
+resolve_server() {
+    local env="$1"
+    case "$env" in
+        staging) echo "${REMOTE_USER:-ubuntu}@${STAGING_HOST:-}" ;;
+        uat)     echo "${REMOTE_USER:-ubuntu}@${UAT_HOST:-}" ;;
+        prod)    echo "${REMOTE_USER:-ubuntu}@${PROD_HOST:-}" ;;
+        *)       print_error "No server for env: $env"; return 1 ;;
+    esac
+}
+
+ssh_cmd() {
+    local server="$1"; shift
+    if [[ -z "$server" || "$server" == *"@" ]]; then
+        print_error "Server not configured — check config.local.sh"
+        return 1
+    fi
+    ssh -o ConnectTimeout=10 "$server" "$@"
+}
+
+# ── Configuration ─────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ME_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+ENVS=(local docker staging uat prod)
+
+# Defaults — config.local.sh overrides these
+PROJECTS_ROOT="${PROJECTS_ROOT:-}"
+STAGING_HOST="${STAGING_HOST:-}"
+UAT_HOST="${UAT_HOST:-}"
+PROD_HOST="${PROD_HOST:-}"
+REMOTE_USER="${REMOTE_USER:-ubuntu}"
+
+# Load local config
+if [[ -f "$ME_ROOT/config.local.sh" ]]; then
+    source "$ME_ROOT/config.local.sh"
+elif [[ -f "$HOME/.config/me/config.sh" ]]; then
+    source "$HOME/.config/me/config.sh"
+fi
+
+# ── Project Discovery ─────────────────────────────────────────────────
+# Discovers projects by scanning for .me.sh files in PROJECTS_ROOT
+
+declare -A DISCOVERED_PROJECTS=()  # name -> directory
+
+discover_projects() {
+    if [[ -z "$PROJECTS_ROOT" ]]; then
+        return
+    fi
+
+    local dir
+    for dir in "$PROJECTS_ROOT"/*/; do
+        [[ -f "$dir/.me.sh" ]] || continue
+        # Extract PROJECT_NAME from adapter without polluting current shell
+        local name
+        name=$(bash -c 'source "'"$dir/.me.sh"'" 2>/dev/null; echo "${PROJECT_NAME:-}"')
+        if [[ -n "$name" ]]; then
+            DISCOVERED_PROJECTS[$name]="${dir%/}"
+        fi
+    done
+}
+
+discover_projects
+
+# Also detect if running as submodule inside a project
+CURRENT_PROJECT=""
+CURRENT_PROJECT_DIR=""
+
+detect_current_project() {
+    # Walk up from ME_ROOT looking for .me.sh
+    # When installed as submodule at project/.me/, ME_ROOT is project/.me
+    local check_dir="$ME_ROOT"
+    if [[ -f "$(dirname "$check_dir")/.me.sh" ]]; then
+        CURRENT_PROJECT_DIR="$(dirname "$check_dir")"
+    elif [[ -f "$check_dir/.me.sh" ]]; then
+        CURRENT_PROJECT_DIR="$check_dir"
+    fi
+
+    if [[ -n "$CURRENT_PROJECT_DIR" ]]; then
+        CURRENT_PROJECT=$(bash -c 'source "'"$CURRENT_PROJECT_DIR/.me.sh"'" 2>/dev/null; echo "${PROJECT_NAME:-}"')
+        if [[ -n "$CURRENT_PROJECT" ]]; then
+            DISCOVERED_PROJECTS[$CURRENT_PROJECT]="$CURRENT_PROJECT_DIR"
+        fi
+    fi
+}
+
+detect_current_project
+
+# ── Adapter Interface ─────────────────────────────────────────────────
+# Each .me.sh must set these variables:
+#   PROJECT_NAME          — short name (e.g. "blog")
+#   PROJECT_DOMAIN        — production domain
+#   PROJECT_REPO          — GitHub org/repo
+#   PROJECT_STACK         — description (e.g. "Go + PostgreSQL")
+#   PROJECT_PORT_BACKEND  — local backend port
+#   PROJECT_PORT_FRONTEND — local frontend port (optional)
+#
+# And implement these functions:
+#   local_start, local_stop, local_dev, local_restart, local_status,
+#   local_logs, local_test, local_test_backend, local_test_frontend,
+#   local_db_migrate, local_db_reset, local_db_seed,
+#   local_users, local_create_admin
+#
+#   docker_start, docker_stop, docker_status, docker_logs, docker_restart
+#
+#   remote_status <env>, remote_logs <env> [args...],
+#   remote_health <env>, remote_restart <env>,
+#   remote_users <env>, remote_create_admin <env> <email>
+
+load_adapter() {
+    local project="$1"
+    local dir="${DISCOVERED_PROJECTS[$project]:-}"
+
+    if [[ -z "$dir" ]]; then
+        print_error "Unknown project: $project"
+        return 1
+    fi
+
+    local adapter="$dir/.me.sh"
+    if [[ ! -f "$adapter" ]]; then
+        print_error "No .me.sh found in $dir"
+        return 1
+    fi
+
+    source "$adapter"
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────
+
+dispatch() {
+    local project="$1" env="$2" cmd="$3"; shift 3
+
+    (
+        load_adapter "$project" || exit 1
+
+        local fn_cmd="${cmd//-/_}"
+
+        if [[ "$env" == "local" || "$env" == "docker" ]]; then
+            local fn="${env}_${fn_cmd}"
+        else
+            local fn="remote_${fn_cmd}"
+        fi
+
+        if declare -f "$fn" >/dev/null 2>&1; then
+            if [[ "$env" != "local" && "$env" != "docker" ]]; then
+                "$fn" "$env" "$@"
+            else
+                "$fn" "$@"
+            fi
+        else
+            print_error "$project: '$cmd' not implemented for '$env' (missing: $fn)"
+            exit 1
+        fi
+    )
+}
+
+# ── Cross-environment Commands ────────────────────────────────────────
+
+cmd_promote() {
+    local project="$1" from_env="$2" to_env="$3"
+
+    (
+        load_adapter "$project" || exit 1
+        local dir="${DISCOVERED_PROJECTS[$project]}"
+        local repo="${PROJECT_REPO:-}"
+        [[ -z "$repo" ]] && { print_error "PROJECT_REPO not set in .me.sh"; exit 1; }
+
+        local from_branch to_branch
+        case "$from_env" in
+            staging) from_branch="main" ;;
+            uat)     from_branch="uat" ;;
+            *)       print_error "Cannot promote from $from_env"; exit 1 ;;
+        esac
+        case "$to_env" in
+            uat)  to_branch="uat" ;;
+            prod) to_branch="production" ;;
+            *)    print_error "Cannot promote to $to_env"; exit 1 ;;
+        esac
+
+        print_header "Promote $project: $from_env -> $to_env"
+        echo -e "  ${DIM}$from_branch -> $to_branch${NC}"
+        echo ""
+
+        if [[ "$to_env" == "prod" ]]; then
+            require_cmd gh "brew install gh" || exit 1
+            gh pr create --repo "$repo" \
+                --base "$to_branch" --head "$from_branch" \
+                --title "Promote $from_env to production" \
+                --body "Automated promotion from $from_env to production."
+            print_success "PR created — merge to deploy"
+        else
+            cd "$dir"
+            git fetch origin
+            git checkout "$to_branch" 2>/dev/null || git checkout -b "$to_branch" "origin/$to_branch"
+            git merge "origin/$from_branch" --no-edit
+            git push origin "$to_branch"
+            git checkout main
+            print_success "Promoted $project: $from_env -> $to_env"
+        fi
+    )
+}
+
+cmd_actions() {
+    local project="$1"
+    (
+        load_adapter "$project" || exit 1
+        local repo="${PROJECT_REPO:-}"
+        [[ -z "$repo" ]] && { print_error "PROJECT_REPO not set"; exit 1; }
+        require_cmd gh "brew install gh" || exit 1
+        print_header "GitHub Actions — $project ($repo)"
+        gh run list --repo "$repo" --limit 5
+    )
+}
+
+cmd_deploy() {
+    local project="$1"; shift
+    local message="${*:-Deploy: automated deployment}"
+
+    (
+        load_adapter "$project" || exit 1
+        local dir="${DISCOVERED_PROJECTS[$project]}"
+
+        print_header "Deploy $project"
+        cd "$dir"
+        if [[ -n "$(git status --porcelain)" ]]; then
+            print_status "Committing changes..."
+            git add -A
+            git commit -m "$message"
+        fi
+        print_status "Pushing to origin/main..."
+        git push origin main
+        print_success "Pushed — deploy triggered for $project"
+    )
+}
+
+cmd_info() {
+    echo ""
+    echo -e "${CYAN}${BOLD}  Project Manager${NC}"
+    echo ""
+
+    if [[ ${#DISCOVERED_PROJECTS[@]} -eq 0 ]]; then
+        print_warning "No projects discovered. Check config.local.sh and .me.sh files."
+        return
+    fi
+
+    printf "  ${BOLD}%-14s %-30s %-24s %s${NC}\n" "Project" "Stack" "Domain" "Port"
+    printf "  %-14s %-30s %-24s %s\n" "-------" "-----" "------" "----"
+    for p in "${!DISCOVERED_PROJECTS[@]}"; do
+        (
+            load_adapter "$p" 2>/dev/null || true
+            printf "  %-14s %-30s %-24s %s\n" \
+                "$p" "${PROJECT_STACK:-?}" "${PROJECT_DOMAIN:-?}" "${PROJECT_PORT_BACKEND:-?}"
+        )
+    done
+    echo ""
+
+    echo -e "  ${BOLD}Environments${NC}"
+    echo -e "  ${DIM}local${NC}     Apps native, DBs in Docker"
+    echo -e "  ${DIM}docker${NC}    Everything in containers"
+    [[ -n "$STAGING_HOST" ]] && echo -e "  ${DIM}staging${NC}   $STAGING_HOST"
+    [[ -n "$UAT_HOST" ]]     && echo -e "  ${DIM}uat${NC}       $UAT_HOST"
+    [[ -n "$PROD_HOST" ]]    && echo -e "  ${DIM}prod${NC}      $PROD_HOST"
+    echo ""
+}
+
+cmd_help() {
+    echo -e "${CYAN}${BOLD}Project Manager${NC}"
+    echo ""
+    echo "Usage: ./scripts/server [env] <command> [project] [args...]"
+    echo ""
+    echo -e "${BOLD}Environments:${NC} local (default), docker, staging, uat, prod"
+    echo -e "${BOLD}Projects:${NC}     Auto-discovered from PROJECTS_ROOT (see config.local.sh)"
+    echo ""
+    echo -e "${YELLOW}Local Commands (default):${NC}"
+    echo "  start [project]              Start app natively"
+    echo "  stop [project]               Stop processes"
+    echo "  dev [project]                Start with hot reload"
+    echo "  status [project]             Show running status"
+    echo "  restart [project]            Stop then start"
+    echo "  logs <project>               Tail logs"
+    echo "  test [project]               Run all tests"
+    echo "  test-backend [project]       Backend tests only"
+    echo "  test-frontend [project]      Frontend tests only"
+    echo "  db-migrate [project]         Run migrations"
+    echo "  db-reset [project]           Reset database"
+    echo "  db-seed [project]            Seed data"
+    echo "  users [project]              List users"
+    echo "  create-admin <project> <email>"
+    echo ""
+    echo -e "${YELLOW}Docker Commands:${NC}"
+    echo "  docker start [project]       docker compose up --build"
+    echo "  docker stop [project]        docker compose down"
+    echo "  docker status [project]      docker compose ps"
+    echo "  docker logs <project>        docker compose logs -f"
+    echo "  docker restart [project]     docker compose restart"
+    echo ""
+    echo -e "${YELLOW}Remote Commands (staging / uat / prod):${NC}"
+    echo "  <env> status [project]       SSH -> service status"
+    echo "  <env> logs <project>         SSH -> service logs"
+    echo "  <env> health [project]       Health check endpoints"
+    echo "  <env> restart [project]      SSH -> restart services"
+    echo "  <env> users <project>        List users"
+    echo "  <env> create-admin <project> <email>"
+    echo ""
+    echo -e "${YELLOW}Cross-environment:${NC}"
+    echo "  promote <project> <from> <to>    Promote between envs"
+    echo "  actions [project]                GitHub Actions runs"
+    echo "  deploy <project> [message]       Commit + push"
+    echo "  info                             Show all projects"
+    echo "  help                             This help"
+    echo ""
+}
+
+# ── Argument Parsing ──────────────────────────────────────────────────
+
+is_env()     { [[ " ${ENVS[*]} " =~ " $1 " ]]; }
+is_project() { [[ -n "${DISCOVERED_PROJECTS[$1]:-}" ]]; }
+
+ENV="local"
+CMD=""
+PROJECT=""
+ARGS=()
+
+if [[ $# -gt 0 ]] && is_env "$1"; then
+    ENV="$1"; shift
+fi
+
+CMD="${1:-help}"; shift 2>/dev/null || true
+
+if [[ $# -gt 0 ]] && is_project "$1"; then
+    PROJECT="$1"; shift
+fi
+
+ARGS=("$@")
+
+# Fall back to current project if running inside a project
+if [[ -z "$PROJECT" && -n "$CURRENT_PROJECT" ]]; then
+    PROJECT="$CURRENT_PROJECT"
+fi
+
+# ── Main Router ───────────────────────────────────────────────────────
+
+case "$CMD" in
+    help|--help|-h)
+        cmd_help ;;
+    info)
+        cmd_info ;;
+    promote)
+        [[ -z "$PROJECT" ]] && { print_error "promote requires: <project> <from> <to>"; exit 1; }
+        cmd_promote "$PROJECT" "${ARGS[0]:-}" "${ARGS[1]:-}" ;;
+    actions)
+        if [[ -n "$PROJECT" ]]; then
+            cmd_actions "$PROJECT"
+        else
+            for p in "${!DISCOVERED_PROJECTS[@]}"; do cmd_actions "$p"; echo ""; done
+        fi ;;
+    deploy)
+        [[ -z "$PROJECT" ]] && { print_error "deploy requires a project"; exit 1; }
+        cmd_deploy "$PROJECT" "${ARGS[@]}" ;;
+
+    start|stop|dev|restart|status|logs|test|test-backend|test-frontend|\
+    db-migrate|db-reset|db-seed|users|create-admin|health)
+        if [[ -n "$PROJECT" ]]; then
+            dispatch "$PROJECT" "$ENV" "$CMD" "${ARGS[@]}"
+        elif [[ ${#DISCOVERED_PROJECTS[@]} -gt 0 ]]; then
+            for p in "${!DISCOVERED_PROJECTS[@]}"; do
+                echo -e "${CYAN}${BOLD}[$p]${NC}"
+                dispatch "$p" "$ENV" "$CMD" "${ARGS[@]}" || true
+                echo ""
+            done
+        else
+            print_error "No project specified and none discovered"
+            exit 1
+        fi ;;
+
+    *) print_error "Unknown command: $CMD"; echo ""; cmd_help; exit 1 ;;
+esac
