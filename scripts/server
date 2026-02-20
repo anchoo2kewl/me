@@ -294,6 +294,41 @@ cmd_promote() {
     )
 }
 
+cmd_copy_db() {
+    local project="$1" from_env="$2" to_env="$3"
+
+    if [[ -z "$from_env" || -z "$to_env" ]]; then
+        print_error "Usage: copy-db [project] <from> <to>"
+        echo -e "  Example: copy-db staging uat"
+        return 1
+    fi
+
+    if [[ "$from_env" == "$to_env" ]]; then
+        print_error "Source and destination must be different"
+        return 1
+    fi
+
+    # Safety: warn when writing to prod
+    if [[ "$to_env" == "prod" ]]; then
+        echo -e "  ${RED}${BOLD}WARNING: This will OVERWRITE the production database!${NC}"
+        echo -n "  Type 'yes' to confirm: "
+        read -r confirm
+        [[ "$confirm" != "yes" ]] && { print_status "Aborted"; return 0; }
+    fi
+
+    (
+        load_adapter "$project" || exit 1
+
+        if ! declare -f copy_db >/dev/null 2>&1; then
+            print_error "$project: copy-db not implemented (missing: copy_db in .me.sh)"
+            exit 1
+        fi
+
+        print_header "Copy DB: $project $from_env -> $to_env"
+        copy_db "$from_env" "$to_env"
+    )
+}
+
 cmd_actions() {
     local project="$1"
     (
@@ -399,6 +434,7 @@ cmd_help() {
     echo -e "${YELLOW}Cross-environment:${NC}"
     echo "  promote [project] staging uat    PR: main -> uat (merge + deploy)"
     echo "  promote [project] uat prod       PR: uat -> production (merge + deploy)"
+    echo "  copy-db [project] <from> <to>    Copy database between environments"
     echo "  actions [project]                GitHub Actions runs"
     echo "  deploy [project] [message]       Commit + push"
     echo "  info                             Show all projects"
@@ -449,6 +485,9 @@ case "$CMD" in
         else
             for p in "${!DISCOVERED_PROJECTS[@]}"; do cmd_actions "$p"; echo ""; done
         fi ;;
+    copy-db)
+        [[ -z "$PROJECT" ]] && { print_error "copy-db requires a project (specify or run from project dir)"; exit 1; }
+        cmd_copy_db "$PROJECT" "${ARGS[0]:-}" "${ARGS[1]:-}" ;;
     deploy)
         [[ -z "$PROJECT" ]] && { print_error "deploy requires a project (specify or run from project dir)"; exit 1; }
         cmd_deploy "$PROJECT" "${ARGS[@]}" ;;
