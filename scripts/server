@@ -210,6 +210,26 @@ dispatch() {
 cmd_promote() {
     local project="$1" from_env="$2" to_env="$3"
 
+    # Validate args
+    if [[ -z "$from_env" || -z "$to_env" ]]; then
+        print_error "Usage: promote <project> <from> <to>"
+        echo -e "  Allowed: ${BOLD}staging${NC} -> ${BOLD}uat${NC} -> ${BOLD}prod${NC}"
+        return 1
+    fi
+
+    # Enforce direction: staging -> uat -> prod (only forward)
+    local valid=""
+    [[ "$from_env" == "staging" && "$to_env" == "uat"  ]] && valid=1
+    [[ "$from_env" == "uat"     && "$to_env" == "prod" ]] && valid=1
+
+    if [[ -z "$valid" ]]; then
+        print_error "Invalid promotion: $from_env -> $to_env"
+        echo -e "  Allowed directions:"
+        echo -e "    ${GREEN}staging${NC} -> ${YELLOW}uat${NC}    (merge main -> uat branch)"
+        echo -e "    ${YELLOW}uat${NC}     -> ${RED}prod${NC}   (creates PR: uat -> production branch)"
+        return 1
+    fi
+
     (
         load_adapter "$project" || exit 1
         local dir="${DISCOVERED_PROJECTS[$project]}"
@@ -220,12 +240,10 @@ cmd_promote() {
         case "$from_env" in
             staging) from_branch="main" ;;
             uat)     from_branch="uat" ;;
-            *)       print_error "Cannot promote from $from_env"; exit 1 ;;
         esac
         case "$to_env" in
             uat)  to_branch="uat" ;;
             prod) to_branch="production" ;;
-            *)    print_error "Cannot promote to $to_env"; exit 1 ;;
         esac
 
         print_header "Promote $project: $from_env -> $to_env"
@@ -354,7 +372,8 @@ cmd_help() {
     echo "  <env> create-admin <project> <email>"
     echo ""
     echo -e "${YELLOW}Cross-environment:${NC}"
-    echo "  promote <project> <from> <to>    Promote between envs"
+    echo "  promote <project> staging uat    Merge main -> uat branch"
+    echo "  promote <project> uat prod       Create PR: uat -> production"
     echo "  actions [project]                GitHub Actions runs"
     echo "  deploy <project> [message]       Commit + push"
     echo "  info                             Show all projects"
@@ -397,7 +416,7 @@ case "$CMD" in
     info)
         cmd_info ;;
     promote)
-        [[ -z "$PROJECT" ]] && { print_error "promote requires: <project> <from> <to>"; exit 1; }
+        [[ -z "$PROJECT" ]] && { print_error "promote requires: <project> <from> <to>"; echo -e "  Allowed: ${BOLD}staging${NC} -> ${BOLD}uat${NC} -> ${BOLD}prod${NC}"; exit 1; }
         cmd_promote "$PROJECT" "${ARGS[0]:-}" "${ARGS[1]:-}" ;;
     actions)
         if [[ -n "$PROJECT" ]]; then

@@ -142,7 +142,8 @@ cd ~/play/blog
 
 | Command | Description |
 |---------|-------------|
-| `promote <project> <from> <to>` | Promote between environments via branch merge or PR |
+| `promote <project> staging uat` | Merge main → uat branch |
+| `promote <project> uat prod` | Create PR: uat → production branch |
 | `actions [project]` | Show recent GitHub Actions runs |
 | `deploy <project> [message]` | Commit + push to trigger deployment |
 | `info` | Show all discovered projects with domains and ports |
@@ -297,18 +298,36 @@ remote_create_admin() { print_warning "$PROJECT_NAME: not implemented"; }
 
 ## Promotion Flow
 
-Staging to UAT promotes via direct branch merge:
+Promotion is **forward-only** and enforces the pipeline direction:
+
+```
+staging  ──→  uat  ──→  prod
+ (main)      (uat)    (production)
+```
+
+Backwards promotion (e.g., `prod staging`) is rejected.
+
+**Staging → UAT** — direct branch merge:
 
 ```bash
 ./scripts/server promote myapp staging uat
 # → git fetch origin && git checkout uat && git merge origin/main && git push origin uat
 ```
 
-UAT to production creates a GitHub PR (production requires review):
+**UAT → Prod** — creates a GitHub PR (production requires review):
 
 ```bash
 ./scripts/server promote myapp uat prod
 # → gh pr create --base production --head uat --title "Promote uat to production"
+```
+
+Invalid examples (all rejected):
+
+```bash
+./scripts/server promote myapp prod staging    # backwards
+./scripts/server promote myapp prod uat        # backwards
+./scripts/server promote myapp staging prod    # skips uat
+./scripts/server promote myapp local staging   # local is not a promotion source
 ```
 
 ## Project Discovery
