@@ -259,7 +259,11 @@ cmd_promote() {
         local pr_output pr_url
         pr_output=$(gh pr create --repo "$repo" \
             --base "$to_branch" --head "$from_branch" \
-            --title "$title" --body "$body" 2>&1) && pr_url="$pr_output" || {
+            --title "$title" --body "$body" 2>&1) && {
+            # Extract URL from output (gh may print warnings before the URL)
+            pr_url=$(echo "$pr_output" | grep -o 'https://github.com/[^ ]*' | tail -1)
+            [[ -z "$pr_url" ]] && pr_url="$pr_output"
+        } || {
 
             # Already up to date — nothing to promote
             if echo "$pr_output" | grep -qi "no commits between"; then
