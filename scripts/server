@@ -212,7 +212,7 @@ cmd_promote() {
 
     # Validate args
     if [[ -z "$from_env" || -z "$to_env" ]]; then
-        print_error "Usage: promote <project> <from> <to>"
+        print_error "Usage: promote [project] <from> <to>"
         echo -e "  Allowed: ${BOLD}staging${NC} -> ${BOLD}uat${NC} -> ${BOLD}prod${NC}"
         return 1
     fi
@@ -372,10 +372,10 @@ cmd_help() {
     echo "  <env> create-admin <project> <email>"
     echo ""
     echo -e "${YELLOW}Cross-environment:${NC}"
-    echo "  promote <project> staging uat    Merge main -> uat branch"
-    echo "  promote <project> uat prod       Create PR: uat -> production"
+    echo "  promote [project] staging uat    Merge main -> uat branch"
+    echo "  promote [project] uat prod       Create PR: uat -> production"
     echo "  actions [project]                GitHub Actions runs"
-    echo "  deploy <project> [message]       Commit + push"
+    echo "  deploy [project] [message]       Commit + push"
     echo "  info                             Show all projects"
     echo "  help                             This help"
     echo ""
@@ -416,7 +416,7 @@ case "$CMD" in
     info)
         cmd_info ;;
     promote)
-        [[ -z "$PROJECT" ]] && { print_error "promote requires: <project> <from> <to>"; echo -e "  Allowed: ${BOLD}staging${NC} -> ${BOLD}uat${NC} -> ${BOLD}prod${NC}"; exit 1; }
+        [[ -z "$PROJECT" ]] && { print_error "promote requires a project (specify or run from project dir)"; echo -e "  Allowed: ${BOLD}staging${NC} -> ${BOLD}uat${NC} -> ${BOLD}prod${NC}"; exit 1; }
         cmd_promote "$PROJECT" "${ARGS[0]:-}" "${ARGS[1]:-}" ;;
     actions)
         if [[ -n "$PROJECT" ]]; then
@@ -425,7 +425,7 @@ case "$CMD" in
             for p in "${!DISCOVERED_PROJECTS[@]}"; do cmd_actions "$p"; echo ""; done
         fi ;;
     deploy)
-        [[ -z "$PROJECT" ]] && { print_error "deploy requires a project"; exit 1; }
+        [[ -z "$PROJECT" ]] && { print_error "deploy requires a project (specify or run from project dir)"; exit 1; }
         cmd_deploy "$PROJECT" "${ARGS[@]}" ;;
 
     start|stop|dev|restart|status|logs|test|test-backend|test-frontend|\

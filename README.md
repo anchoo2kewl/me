@@ -88,7 +88,7 @@ When running from a project's `.me/` submodule, the current project is auto-dete
 ./scripts/server docker start folioworth    # Start folioworth in Docker
 ./scripts/server staging health             # Health check all on staging
 ./scripts/server prod logs taskai           # Tail production logs for taskai
-./scripts/server promote blog staging uat   # Promote blog: staging → uat
+./scripts/server promote blog staging uat    # Promote blog: staging → uat
 
 # From a project's .me/ submodule (auto-detects project)
 cd ~/play/blog
@@ -142,10 +142,10 @@ cd ~/play/blog
 
 | Command | Description |
 |---------|-------------|
-| `promote <project> staging uat` | Merge main → uat branch |
-| `promote <project> uat prod` | Create PR: uat → production branch |
+| `promote [project] staging uat` | Merge main → uat branch |
+| `promote [project] uat prod` | Create PR: uat → production branch |
 | `actions [project]` | Show recent GitHub Actions runs |
-| `deploy <project> [message]` | Commit + push to trigger deployment |
+| `deploy [project] [message]` | Commit + push to trigger deployment |
 | `info` | Show all discovered projects with domains and ports |
 | `help` | Show help |
 
@@ -310,24 +310,29 @@ Backwards promotion (e.g., `prod staging`) is rejected.
 **Staging → UAT** — direct branch merge:
 
 ```bash
+# From project submodule (project auto-detected)
+.me/scripts/server promote staging uat
+
+# From me/ directory (specify project)
 ./scripts/server promote myapp staging uat
+
 # → git fetch origin && git checkout uat && git merge origin/main && git push origin uat
 ```
 
 **UAT → Prod** — creates a GitHub PR (production requires review):
 
 ```bash
-./scripts/server promote myapp uat prod
+.me/scripts/server promote uat prod
 # → gh pr create --base production --head uat --title "Promote uat to production"
 ```
 
 Invalid examples (all rejected):
 
 ```bash
-./scripts/server promote myapp prod staging    # backwards
-./scripts/server promote myapp prod uat        # backwards
-./scripts/server promote myapp staging prod    # skips uat
-./scripts/server promote myapp local staging   # local is not a promotion source
+promote prod staging    # backwards
+promote prod uat        # backwards
+promote staging prod    # skips uat
+promote local staging   # local is not a promotion source
 ```
 
 ## Project Discovery
