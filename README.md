@@ -142,8 +142,8 @@ cd ~/play/blog
 
 | Command | Description |
 |---------|-------------|
-| `promote [project] staging uat` | Merge main → uat branch |
-| `promote [project] uat prod` | Create PR: uat → production branch |
+| `promote [project] staging uat` | PR: main → uat (merge + deploy) |
+| `promote [project] uat prod` | PR: uat → production (merge + deploy) |
 | `actions [project]` | Show recent GitHub Actions runs |
 | `deploy [project] [message]` | Commit + push to trigger deployment |
 | `info` | Show all discovered projects with domains and ports |
@@ -307,7 +307,9 @@ staging  ──→  uat  ──→  prod
 
 Backwards promotion (e.g., `prod staging`) is rejected.
 
-**Staging → UAT** — direct branch merge:
+Both directions create a PR via `gh` and merge it, which triggers CI/CD:
+
+**Staging → UAT**:
 
 ```bash
 # From project submodule (project auto-detected)
@@ -316,14 +318,17 @@ Backwards promotion (e.g., `prod staging`) is rejected.
 # From me/ directory (specify project)
 ./scripts/server promote myapp staging uat
 
-# → git fetch origin && git checkout uat && git merge origin/main && git push origin uat
+# → gh pr create --base uat --head main
+# → gh pr merge (triggers deploy-uat workflow)
 ```
 
-**UAT → Prod** — creates a GitHub PR (production requires review):
+**UAT → Prod**:
 
 ```bash
 .me/scripts/server promote uat prod
-# → gh pr create --base production --head uat --title "Promote uat to production"
+
+# → gh pr create --base production --head uat
+# → gh pr merge (triggers deploy-production workflow)
 ```
 
 Invalid examples (all rejected):

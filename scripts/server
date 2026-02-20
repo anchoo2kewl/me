@@ -250,22 +250,36 @@ cmd_promote() {
         echo -e "  ${DIM}$from_branch -> $to_branch${NC}"
         echo ""
 
-        if [[ "$to_env" == "prod" ]]; then
-            require_cmd gh "brew install gh" || exit 1
-            gh pr create --repo "$repo" \
+        require_cmd gh "brew install gh" || exit 1
+
+        local title="Promote $from_env to $to_env"
+        local body="Automated promotion: merge \`$from_branch\` into \`$to_branch\`."
+
+        # Create PR
+        local pr_url
+        pr_url=$(gh pr create --repo "$repo" \
+            --base "$to_branch" --head "$from_branch" \
+            --title "$title" --body "$body" 2>&1) || {
+            # If PR already exists, find it
+            pr_url=$(gh pr list --repo "$repo" \
                 --base "$to_branch" --head "$from_branch" \
-                --title "Promote $from_env to production" \
-                --body "Automated promotion from $from_env to production."
-            print_success "PR created — merge to deploy"
-        else
-            cd "$dir"
-            git fetch origin
-            git checkout "$to_branch" 2>/dev/null || git checkout -b "$to_branch" "origin/$to_branch"
-            git merge "origin/$from_branch" --no-edit
-            git push origin "$to_branch"
-            git checkout main
-            print_success "Promoted $project: $from_env -> $to_env"
-        fi
+                --state open --json url --jq '.[0].url' 2>/dev/null)
+            if [[ -z "$pr_url" ]]; then
+                print_error "Failed to create PR"
+                exit 1
+            fi
+            print_warning "PR already exists: $pr_url"
+        }
+
+        echo -e "  ${DIM}$pr_url${NC}"
+        echo ""
+
+        # Merge the PR (triggers CI/CD)
+        print_status "Merging PR..."
+        gh pr merge --repo "$repo" --merge --auto "$pr_url" 2>/dev/null \
+            || gh pr merge --repo "$repo" --merge "$pr_url"
+
+        print_success "Promoted $project: $from_env -> $to_env"
     )
 }
 
@@ -372,8 +386,8 @@ cmd_help() {
     echo "  <env> create-admin <project> <email>"
     echo ""
     echo -e "${YELLOW}Cross-environment:${NC}"
-    echo "  promote [project] staging uat    Merge main -> uat branch"
-    echo "  promote [project] uat prod       Create PR: uat -> production"
+    echo "  promote [project] staging uat    PR: main -> uat (merge + deploy)"
+    echo "  promote [project] uat prod       PR: uat -> production (merge + deploy)"
     echo "  actions [project]                GitHub Actions runs"
     echo "  deploy [project] [message]       Commit + push"
     echo "  info                             Show all projects"
